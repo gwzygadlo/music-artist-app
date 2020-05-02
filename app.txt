@@ -1,0 +1,215 @@
+//libraries
+const fs = require('fs');
+const http = require('http');
+const https = require('https');
+const url_lib = require('url');
+const querystring = require('querystring');
+
+//Separating Requests		
+const server = http.createServer((req, res) => {
+	
+	//variables
+	console.log(req.url);
+	var favicon_word = '/favicon.ico';
+	var artist_word = '/artists/';
+	var search_word = '/search';
+	let user_input;
+	const rstream = fs.createReadStream('./html/search-form.html');
+	
+	//root directory
+	if (req.url === '/'){
+		res.writeHead(200, {'Content-Type': 'text/html'});
+		rstream.pipe(res);
+	}
+	
+	//favicon directory
+	else if(req.url.includes(favicon_word)){
+		res.writeHead(404);
+		res.end();
+	}
+	
+	//artist directory
+	else if(req.url.includes(artist_word)){
+		var imageid = req.url.substring(9);
+		let image_stream = fs.createReadStream('./artists/' + imageid);
+		//image not found error
+		image_stream.on('error', (err) => {
+			console.log(err);
+			res.writeHead(404);
+			return res.end();
+		});
+		res.writeHead(200, {'Content-Type': 'image/jpeg'});
+		image_stream.pipe(res);
+	}
+	
+	//search queries
+	else if(req.url.includes(search_word)){
+		res.writeHead(200, {'Content-Type': 'text/html'});
+		
+		//search part 1
+		user_input = url_lib.parse(req.url, true).query;
+	
+		//authentication with JSON read file
+		const credentials_json = fs.readFileSync('./auth/credentials.json', 'utf-8');
+		const credentials = JSON.parse(credentials_json);
+
+		//object post data for identification
+		var post_data = {
+			client_id : '5014e12ec5b649b7b5c5544ca63e00fb',
+			client_secret : 'ee2aa5bbc520473ebd073fdf8eb49df7',
+			grant_type : 'client_credentials'
+		};
+		
+		//post data must be in query string format
+		post_data = querystring.stringify(post_data);
+
+		//options for https post request
+		const options = {
+			//hostname: 'accounts.spotify.com',
+			//path: '/api/token',
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/x-www-form-urlencoded',
+				'Content-Length': post_data.length,
+			}
+		};
+
+		//cache location
+		const authentication_cache = './auth/authentication_res.json';
+		//cache chacking for authentication token
+		let cache_valid = false;
+		if(fs.existsSync(authentication_cache)) {
+			content = fs.readFileSync(authentication_cache, 'utf-8');
+			cached_auth = JSON.parse(content);
+			if (new Date(cached_auth.expiration) > Date.now()) {
+				cache_valid = true;
+			}
+			else {
+				
+			}
+		}
+		if(cache_valid) {
+				create_search_req(cached_auth,res,user_input);
+		}
+		//creating https post request for spotify
+		else {
+			const authentication_req_url = 'https://accounts.spotify.com/api/token';
+			let request_sent_time = new Date();
+			let authentication_req = https.request(authentication_req_url, options, authentication_res => {
+				received_authentication(authentication_res, res, user_input, request_sent_time);
+			});
+			authentication_req.on("error", (err) => {
+				console.error(err);
+			});
+			authentication_req.write(post_data);
+			authentication_req.end();
+		}
+		//post requests need req.write to send the request and query string id put into the body of the request
+	}
+});
+
+//data for received authentication
+let authentication_res_data;
+let access_token;
+
+//search request function
+function create_search_req(authentication_res_data, res, user_input, request_sent_time){
+	
+	//url for get request
+	let url = 'https://api.spotify.com/v1/search?q=' + user_input.artist + '&type=artist&access_token=' + authentication_res_data.access_token.toString();
+	console.log(url);
+	
+	//get request for artist object
+	let artist_search_req = https.get(url, /* options,*/ (artist_search_res_data) => {
+		received_artist(artist_search_res_data, res);
+	});
+	artist_search_req.on('error', err => {
+		console.log(err);
+	});
+}
+
+//function to catch results of authentitcation
+function received_authentication(authentication_res, res, user_input, request_sent_time) {
+	authentication_res.setEncoding('utf8');
+	let body = "";
+	authentication_res.on("data", data => {body += data;});
+	authentication_res.on("end", () => {
+		authentication_res_data = JSON.parse(body);
+		authentication_res_data.expiration = request_sent_time.addHours(-4);
+		access_token = authentication_res_data.access_token;
+		create_cache(authentication_res_data);
+		create_search_req(authentication_res_data, res, user_input, request_sent_time);
+	});
+}
+
+//function to catch results of artist authentitcation
+function received_artist(artist_search_res_data, res){
+	
+	artist_search_res_data.setEncoding('utf8');
+	let body = '';
+	
+	//read it in
+	artist_search_res_data.on('data', data => { body += data; });
+	artist_search_res_data.on('end', () => {
+		let artist_search_res_data_new = JSON.parse(body);
+		
+		//need info on all three
+		let artist_image_name = artist_search_res_data_new.artists.items[0].name;
+		let artist_image_genres = artist_search_res_data_new.artists.items[0].genres;
+		let artist_image_url = artist_search_res_data_new.artists.items[0].images[0].url;
+		console.log(artist_image_name);
+		console.log(artist_image_genres);
+		console.log(artist_image_url);
+		//find image from the cache
+		if(fs.existsSync('./artists/' + artist_image_name + '.jpg')){
+			let webpage = `<h1> ${artist.name} </h1> <p> ${artist_image_genres.join()} </p> <img src="./artists/${artist_image_name}.jpg" /> ` ;
+			res.write(webpage);
+			return res.end();
+		}
+	});
+}
+
+//function to process imagae request
+function download_image(artist_image_res, artist_image_name, artist_image_genres, res){
+	
+	//write the image from folder
+	let new_artist_image = fs.createWriteStream('./artists/' + artist_image_name + '.jpg', {'encoding' : null});
+	
+	//pipe image
+	artist_image_res.pipe(new_artist_image);
+	new_artist_image.on('finish', () => {
+		let webpage = `<h1> ${artist.name} </h1> <p> ${artist_image_genres.join()} </p> <img src="./artists/${artist_image_name}.jpg" /> ` ;
+		res.write(webpage);
+		res.end();
+		console.log("printed")
+	});
+}
+
+//obj for authentication data to put into
+var obj = {
+		
+};
+
+//function to write authentication data to file authentication res
+function create_cache(authentication_res_data) {
+	obj = authentication_res_data; 
+	var JSONcontent = JSON.stringify(obj);
+	fs.writeFile('./auth/authentication_res.json', JSONcontent, 'utf8', (err) => {
+		if (err){
+			return console.log(err);
+			//return res.end();
+		}
+	console.log('The file has been saved!');
+	});
+
+}
+
+//date add hour function for tokens
+Date.prototype.addHours = function(h) {    
+   this.setTime(this.getTime() + (h*60*60*1000)); 
+   return this;   
+};
+
+//create a server local host
+server.listen(3000);
+console.log('server is listening');
